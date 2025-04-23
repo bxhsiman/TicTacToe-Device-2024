@@ -1,0 +1,169 @@
+import cv2
+import numpy as np
+
+def find_qipan(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    edged = cv2.Canny(gray, 50, 150)
+    kernel = np.ones((5, 5), np.uint8)
+    dilated = cv2.dilate(edged, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if len(contours) > 0:
+        largest_contour = max(contours, key=cv2.contourArea)
+        epsilon = 0.02 * cv2.arcLength(largest_contour, True)
+        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+
+        if len(approx) == 4:
+            corners = approx.reshape((4, 2))
+            tl, bl, br, tr = corners
+
+            cross_points = []
+            for i in range(4):
+                for j in range(4):
+                    cross_x = int((tl[0] * (3 - i) + tr[0] * i) * (3 - j) / 9 +
+                                  (bl[0] * (3 - i) + br[0] * i) * j / 9)
+                    cross_y = int((tl[1] * (3 - i) + tr[1] * i) * (3 - j) / 9 +
+                                  (bl[1] * (3 - i) + br[1] * i) * j / 9)
+                    cross_points.append((cross_x, cross_y))
+
+            centers = []
+            for i in range(3):
+                for j in range(3):
+                    center_x = int((cross_points[i * 4 + j][0] + cross_points[i * 4 + j + 1][0] +
+                                    cross_points[(i + 1) * 4 + j][0] + cross_points[(i + 1) * 4 + j + 1][0]) / 4)
+                    center_y = int((cross_points[i * 4 + j][1] + cross_points[i * 4 + j + 1][1] +
+                                    cross_points[(i + 1) * 4 + j][1] + cross_points[(i + 1) * 4 + j + 1][1]) / 4)
+                    centers.append((center_x, center_y))
+
+            if len(centers) == 9:
+                centers = np.array(centers)
+                rect = np.zeros((9, 2), dtype="float32")
+                s = centers.sum(axis=1)
+                idx_0 = np.argmin(s)
+                idx_8 = np.argmax(s)
+                diff = np.diff(centers, axis=1)
+                idx_2 = np.argmin(diff)
+                idx_6 = np.argmax(diff)
+                rect[0] = centers[idx_0]
+                rect[2] = centers[idx_2]
+                rect[6] = centers[idx_6]
+                rect[8] = centers[idx_8]
+
+                calc_center = (rect[0] + rect[2] + rect[6] + rect[8]) / 4
+                mask = np.zeros(centers.shape[0], dtype=bool)
+                idxes = [1, 3, 4, 5, 7]
+                mask[idxes] = True
+                others = centers[mask]
+                idx_l = others[:, 0].argmin()
+                idx_r = others[:, 0].argmax()
+                idx_t = others[:, 1].argmin()
+                idx_b = others[:, 1].argmax()
+                found = np.array([idx_l, idx_r, idx_t, idx_b])
+                mask = np.isin(range(len(others)), found, invert=False)
+                idx_c = np.where(mask == False)[0]
+                if len(idx_c) == 1:
+                    rect[1] = others[idx_t]
+                    rect[3] = others[idx_l]
+                    rect[4] = others[idx_c]
+                    rect[5] = others[idx_r]
+                    rect[7] = others[idx_b]
+                    return rect
+
+    return None
+
+def detect_chess_positions(frame):
+
+    # 存储棋子位置的列表
+    chess_positions = []
+
+    # 定义位置合并的阈值
+    merge_threshold = 40  # 假设阈值为40像素
+
+    # 转换为灰度图像
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # 高斯模糊去除噪声
+    blurred = cv2.GaussianBlur(gray, (11, 11), 0)
+
+    # 使用霍夫圆变换检测圆
+    circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
+                               param1=50, param2=30, minRadius=20, maxRadius=35)
+
+    if circles is not None:
+        circles = np.round(circles[0, :]).astype("int")
+
+        for (x, y, r) in circles:
+            # 提取圆的区域ROI
+            roi = frame[y - r:y + r, x - r:x + r]
+            # 计算ROI的灰度平均值
+            mean = cv2.mean(roi)[0]
+
+            # 判断圆的颜色并标注
+            if mean < 130:  # 假设阈值100为黑色
+                color = (0, 0, 255)  # 红色标注黑色圆
+                label = "Black"
+            else:
+                color = (255, 0, 0)  # 蓝色标注白色圆
+                label = "White"
+
+            # 判断是否合并位置
+            merge = False
+            for idx, (cx, cy, _) in enumerate(chess_positions):
+                dist = np.sqrt((cx - x) ** 2 + (cy - y) ** 2)
+                if dist < merge_threshold:
+                    # 更新位置为平均值
+                    chess_positions[idx] = ((cx + x) // 2, (cy + y) // 2, label)
+                    merge = True
+                    break
+
+            if not merge:
+                # 如果不合并，则添加新位置
+                chess_positions.append((x, y, label))
+
+    # 返回检测到的棋子位置信息和帧
+    return chess_positions, frame
+
+# 打开摄像头
+cam = cv2.VideoCapture(1)  # 使用摄像头1，可以根据实际情况修改
+if not cam.isOpened():
+    print("Cannot open camera")
+else:
+    ret, frame = cam.read()
+    # 调用棋盘检测函数
+    rect = find_qipan(frame)
+    # 显示棋盘检测结果
+    if rect is not None:
+        print("Detected Chessboard Corners:")
+        print(rect)
+    while True:
+        ret, frame = cam.read()
+        if not ret:
+            print("Failed to grab frame")
+            break
+        # 调用函数检测棋子位置
+        chess_positions, frame = detect_chess_positions(frame)
+        # 在帧上绘制检测到的圆和标签
+        for (x, y, label) in chess_positions:
+            # 根据颜色选择标注
+            if label == "Black":
+                color = (0, 0, 255)  # 红色标注黑色圆
+            else:
+                color = (255, 0, 0)  # 蓝色标注白色圆
+
+            cv2.circle(frame, (x, y), 20, color, 4)
+            cv2.putText(frame, label, (x - 20, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, color, 2)
+        for i in range(9):
+            cv2.circle(frame, (int(rect[i][0]), int(rect[i][1])), 3, (0, 255, 0), -1)
+            cv2.putText(frame, f"{i + 1}", (int(rect[i][0]), int(rect[i][1])),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+        # 显示棋盘检测结果
+        cv2.imshow('Chessboard Detection', frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+cam.release()
+cv2.destroyAllWindows()
